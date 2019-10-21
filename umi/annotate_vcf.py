@@ -15,38 +15,53 @@ import pysam
 def main(umi, bam):
   # find barcodes 
   logging.info('reading %s...', umi)
-  barcodes = {}
+  barcodes = {} # readname -> barcode
+  seen = set()
+  idx = 0
   for idx, line in enumerate(gzip.open(umi, 'r')):
     if idx % 4 == 0:
       name = line.strip().decode('UTF-8')[1:].split(' ')[0] # read name
     elif idx % 4 == 1:
       barcode = line.strip().decode('UTF-8')
       barcodes[name] = barcode
+      seen.add(barcode)
     if idx % 1000000 == 0:
-      logging.info('%i umi lines processed...', idx)
+      logging.debug('%i umi lines processed with %i distinct barcodes...', idx, len(seen))
+  logging.info('%i umi lines processed with %i distinct barcodes...', idx, len(seen))
 
   logging.info('reading %s and stdin (vcf)...', bam)
-  samfile = pysam.AlignmentFile(bam, "rb" )
+  samfile = pysam.AlignmentFile(bam, 'rb')
   vcf_in = cyvcf2.VCF('-')
   vcf_in.add_info_to_header({'ID': 'umi', 'Description': 'Number of distinct UMI barcodes and number of reads overlapping the variant', 'Type':'Character', 'Number': '1'})
   sys.stdout.write(vcf_in.raw_header)
 
+  idx = 0
+  worst = (1, None)
+  best = (0, None)
   for idx, variant in enumerate(vcf_in):
-    logging.debug('analysing %s:%i', variant.CHROM, variant.POS)
+    position = '{}:{}'.format(variant.CHROM, variant.POS)
+    logging.debug('analysing %s', position)
     overlapping_barcodes = set()
-    reads = 0
+    reads = set()
     for column in samfile.pileup(variant.CHROM, variant.POS, variant.POS + 1):
       for read in column.pileups:
-        overlapping_barcodes.add(read.alignment.query_name)
-        reads += 1
-    logging.debug('%i reads overlapping %s:%i with %i distinct barcodes', reads, variant.CHROM, variant.POS, len(overlapping_barcodes))
-    variant.INFO['umi'] = '{}/{}'.format(len(overlapping_barcodes), reads)
+        overlapping_barcodes.add(barcodes[read.alignment.query_name])
+        reads.add(read.alignment.query_name)
+    logging.debug('%i reads overlapping %s with %i distinct barcodes', len(reads), position, len(overlapping_barcodes))
+    variant.INFO['umi'] = '{}/{}'.format(len(overlapping_barcodes), len(reads))
+
+    proportion = len(overlapping_barcodes) / len(reads)
+    if proportion < worst[0]:
+      worst = (proportion, position)
+    if proportion > best[0]:
+      best = (proportion, position)
+
     sys.stdout.write(str(variant))
     
     if idx < 5 or idx % 1000 == 0:
-      logging.info('read %i variants...', idx)
+      logging.debug('read %i variants...', idx)
 
-  logging.info('done.')
+  logging.info('done writing %i variants. best proportion %s worst proportion %s', idx, best, worst)
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Finds reads matching a barcode')
